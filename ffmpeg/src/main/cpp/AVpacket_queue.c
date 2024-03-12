@@ -1,6 +1,3 @@
-//
-// Created by frank on 2018/2/3.
-//
 #include "AVpacket_queue.h"
 #include <stdlib.h>
 #include <libavcodec/avcodec.h>

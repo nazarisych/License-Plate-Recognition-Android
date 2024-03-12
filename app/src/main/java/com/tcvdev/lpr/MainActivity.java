@@ -1,8 +1,12 @@
 package com.tcvdev.lpr;
 
+import static org.opencv.core.CvType.CV_8UC4;
+
 import android.Manifest;
 import android.content.DialogInterface;
 import android.content.pm.PackageManager;
+import android.graphics.PixelFormat;
+import android.hardware.usb.UsbDevice;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.support.annotation.NonNull;
@@ -10,6 +14,7 @@ import android.support.v4.app.ActivityCompat;
 import android.support.v4.content.ContextCompat;
 import android.support.v7.app.AppCompatActivity;
 import android.support.v7.app.AlertDialog;
+import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
@@ -24,31 +29,43 @@ import android.widget.RelativeLayout;
 import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
+import android.widget.Toast;
 
+import com.arksine.libusbtv.DeviceParams;
+import com.arksine.libusbtv.IUsbTvDriver;
+import com.arksine.libusbtv.UsbTv;
+import com.arksine.libusbtv.UsbTvFrame;
 import com.codekidlabs.storagechooser.StorageChooser;
 import com.codekidlabs.storagechooser.Content;
 
 
 import com.frank.ffmpeg.VideoPlayer;
+import com.tcvdev.lpr.common.USBTVRenderer;
 import com.tcvdev.lpr.common.Util;
+import com.tcvdev.lpr.element.DetectView;
+
+import org.opencv.core.Mat;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import timber.log.Timber;
 
 public class MainActivity extends AppCompatActivity implements View.OnClickListener, SurfaceHolder.Callback,
-        VideoPlayer.FFMPEGCallback {
+        VideoPlayer.FFMPEGCallback, USBTVRenderer.USBRenderCallback {
     private static final int STATUS_STOP = 0;
     private static final int STATUS_PAUSE = 1;
     private static final int STATUS_PLAY = 2;
-    private static final String TAG = "LPR";
     private EditText m_etVideoPath, m_etUSBPath;
     private Button m_btnVideoOpen, m_btnUSBOpen, m_btnPlay, m_btnPause, m_btnStop;
     private Button m_btnRewind30, m_btnRewind10, m_btnForward30, m_btnForward10;
     private RadioButton m_rbVideo, m_rbUSB;
     private Spinner m_spinCountry;
     private SurfaceView m_sfImageView;
+    private DetectView m_vwDetect;
     private SurfaceHolder m_surfaceHolder;
     private TextView m_tvPlayingTime;
     private SeekBar m_sbTime;
@@ -58,9 +75,18 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     private int m_nVideoWidth = 0;
     private int m_nVideoHeight = 0;
     private boolean m_bVideoPaused = false;
+    private boolean m_bUSBPaused = false;
     private long mDuration;
     private boolean m_bFirstOpen = true;
     private byte[] byteVideoFrame;
+    private byte[] byteUSBFrame;
+    private UsbDevice m_device = null;
+    private IUsbTvDriver mUSBDriver;
+    private Surface mPreviewSurface;
+    private boolean m_bCameraOpened = false;
+    private final Object CAM_LOCK = new Object();
+    AtomicBoolean mIsStreaming = new AtomicBoolean(false);
+    private USBTVRenderer mRenderer = null;
     private int m_nPlayStatus;
     private final StorageChooser.Builder builder = new StorageChooser.Builder();
     private final ArrayList<String> mCountryList = new ArrayList<>();
@@ -120,6 +146,9 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         if (v.getId() == R.id.btn_video_open) {
             onBtnVideoOpen();
         }
+        if (v.getId() == R.id.btn_usb_open) {
+            onBtnUSBOpen();
+        }
         if (v.getId() == R.id.btn_video_play) {
             onBtnVideoPlay();
         }
@@ -131,17 +160,130 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         if (v.getId() == R.id.btn_video_stop) {
             onBtnVideoStop();
         }
+
+        if (v.getId() == R.id.btn_rewind_10) {
+            setSeekStatus(-1);
+        }
+
+        if (v.getId() == R.id.btn_rewind_30) {
+            setSeekStatus(-2);
+        }
+
+        if (v.getId() == R.id.btn_forward_10) {
+            setSeekStatus(1);
+        }
+
+        if (v.getId() == R.id.btn_forward_30) {
+            setSeekStatus(2);
+        }
     }
 
-    private void onBtnVideoStop() {
-        m_nPlayStatus = STATUS_STOP;
+    private void onBtnUSBOpen() {
+        onBtnVideoStop();
+        m_btnPlay.setEnabled(false);
+        openUSBCamera();
+    }
 
+    private void setSeekStatus(int nSeekState) {
+        if (m_videoPlayer != null)
+            m_videoPlayer.setSeekStatus(nSeekState);
+    }
+
+    private final UsbTv.onFrameReceivedListener mOnFrameReceivedListener = new UsbTv.onFrameReceivedListener() {
+        @Override
+        public void onFrameReceived(UsbTvFrame frame) {
+            if (mRenderer != null) {
+                mRenderer.processFrame(frame);
+            }
+        }
+    };
+    private final UsbTv.DriverCallbacks mCallbacks = new UsbTv.DriverCallbacks() {
+        @Override
+        public void onOpen(IUsbTvDriver driver, final boolean status) {
+            Timber.i("UsbTv Open Status: %b", status);
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(MainActivity.this, "UsbTv Open Status: " + status, Toast.LENGTH_SHORT).show();
+                }
+            });
+            m_bCameraOpened = true;
+            synchronized (CAM_LOCK) {
+                mUSBDriver = driver;
+
+                if (mUSBDriver != null) {
+                    mUSBDriver.setOnFrameReceivedListener(mOnFrameReceivedListener);
+                    final int frameWidth = mUSBDriver.getDeviceParams().getFrameWidth();
+                    final int frameHeight = mUSBDriver.getDeviceParams().getFrameHeight();
+                    byteUSBFrame = new byte[frameWidth * frameHeight * 4];
+                    m_vwDetect.setImageSize(frameWidth, frameHeight);
+                    m_sfImageView.post(new Runnable() {
+                        @Override
+                        public void run() {
+
+                            int containerWidth = m_rlImageView.getWidth();
+                            int containerHeight = m_rlImageView.getHeight();
+
+                            float scaleX = frameWidth / (float) containerWidth;
+                            float scaleY = frameHeight / (float) containerHeight;
+                            float scale = Math.max(scaleX, scaleY);
+
+                            int realWidth = (int) (frameWidth / scale);
+                            int realHeight = (int) (frameHeight / scale);
+                            setVideoSize(realWidth, realHeight);
+                        }
+                    });
+
+                    // If I have a preview surface, we can fetch the renderer and start it
+                    if (mPreviewSurface != null) {
+                        mIsStreaming.set(true);
+                        if (mRenderer == null) {
+                            mRenderer = new USBTVRenderer(getApplicationContext(), mPreviewSurface);
+                            mRenderer.setUSBRenderCallback(MainActivity.this);
+                        } else {
+                            mRenderer.setSurface(mPreviewSurface);
+                        }
+                        mRenderer.startRenderer(mUSBDriver.getDeviceParams(), byteUSBFrame);
+                        mUSBDriver.startStreaming();
+                    }
+                }
+            }
+        }
+
+        @Override
+        public void onClose() {
+            Timber.i("UsbTv Device Closed");
+            m_bCameraOpened = false;
+            if (mRenderer != null) {
+                mRenderer.stopRenderer();
+            }
+
+            if (mPreviewSurface != null) {
+                mPreviewSurface.release();
+            }
+            // Unregister Library Receiver
+            UsbTv.unregisterUsbReceiver(MainActivity.this);
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    finish();
+                }
+            });
+        }
+
+        @Override
+        public void onError() {
+            Timber.i("Error received");
+        }
+    };
+
+    private void onBtnVideoStop() {
         m_videoPlayer.stop();
 
         m_btnPlay.setEnabled(true);
         m_btnPause.setEnabled(false);
         m_btnStop.setEnabled(false);
-
+        m_nPlayStatus = STATUS_STOP;
         setPlayingTime(0, 0);
     }
 
@@ -207,15 +349,16 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         chooser.setOnSelectListener(new StorageChooser.OnSelectListener() {
             @Override
             public void onSelect(String path) {
+                UsbTv.closeCamera();
                 m_etVideoPath.setText(path);
                 m_btnPlay.setEnabled(true);
                 m_btnPause.setEnabled(false);
                 m_btnStop.setEnabled(false);
-                try {
-                    loadVideo();
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
+
+                if (!m_bFirstOpen)
+                    onBtnVideoStop();
+                m_bFirstOpen = false;
+                onBtnVideoPlay();
             }
         });
         chooser.show();
@@ -247,10 +390,12 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
 
             }
+
             @Override
             public void onStartTrackingTouch(SeekBar seekBar) {
 
             }
+
             @Override
             public void onStopTrackingTouch(SeekBar seekBar) {
                 setSeekSec(seekBar.getProgress());
@@ -262,17 +407,23 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         m_rbVideo.setChecked(true);
         m_rbUSB.setChecked(false);
 
-        m_rbVideo.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                enableViews(1);
-            }
-        });
-
         m_rbUSB.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 enableViews(2);
+            }
+        });
+
+        m_rbVideo.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (mRenderer != null) {
+                    mRenderer.stopRenderer();
+                }
+                if (mUSBDriver != null && mUSBDriver.isOpen()) {
+                    mUSBDriver.close();
+                }
+                enableViews(1);
             }
         });
 
@@ -302,6 +453,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             }
         });
         enableViews(1);
+        UsbTv.registerUsbReceiver(this);
     }
 
     void setSeekSec(float fltSec) {
@@ -349,57 +501,53 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             }
         }
         if (!granted) {
-            ActivityCompat.requestPermissions(MainActivity.this,
-                    perms,
-                    444);
+            ActivityCompat.requestPermissions(MainActivity.this, perms, 444);
         }
     }
 
     private void loadVideo() throws IOException {
 
-        if (!m_bFirstOpen)
-            m_videoPlayer.stop();
-        m_bFirstOpen = false;
-
         final String strVideoPath = m_etVideoPath.getText().toString();
-        mediaMetadataRetriever = new MediaMetadataRetriever();
-        mediaMetadataRetriever.setDataSource(this, Uri.parse(strVideoPath));
-        m_nVideoWidth = Integer.parseInt(Objects.requireNonNull(mediaMetadataRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)));
-        m_nVideoHeight = Integer.parseInt(Objects.requireNonNull(mediaMetadataRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)));
-        //m_vwDetect.setImageSize(m_nVideoWidth, m_nVideoHeight);
-        m_sfImageView.post(new Runnable() {
-            @Override
-            public void run() {
+        try {
+            mediaMetadataRetriever = new MediaMetadataRetriever();
+            mediaMetadataRetriever.setDataSource(this, Uri.parse(strVideoPath));
+            m_nVideoWidth = Integer.parseInt(Objects.requireNonNull(mediaMetadataRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)));
+            m_nVideoHeight = Integer.parseInt(Objects.requireNonNull(mediaMetadataRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)));
+            //m_vwDetect.setImageSize(m_nVideoWidth, m_nVideoHeight);
+            m_sfImageView.post(new Runnable() {
+                @Override
+                public void run() {
 
-                int containerWidth = m_rlImageView.getWidth();
-                int containerHeight = m_rlImageView.getHeight();
+                    int containerWidth = m_rlImageView.getWidth();
+                    int containerHeight = m_rlImageView.getHeight();
 
-                float scaleX = m_nVideoWidth / (float) containerWidth;
-                float scaleY = m_nVideoHeight / (float) containerHeight;
-                float scale = Math.max(scaleX, scaleY);
+                    float scaleX = m_nVideoWidth / (float) containerWidth;
+                    float scaleY = m_nVideoHeight / (float) containerHeight;
+                    float scale = Math.max(scaleX, scaleY);
 
-                int realWidth = (int) (m_nVideoWidth / scale);
-                int realHeight = (int) (m_nVideoHeight / scale);
+                    int realWidth = (int) (m_nVideoWidth / scale);
+                    int realHeight = (int) (m_nVideoHeight / scale);
 
-                setVideoSize(realWidth, realHeight);
-            }
-        });
-        byteVideoFrame = new byte[m_nVideoWidth * m_nVideoHeight * 4];
+                    setVideoSize(realWidth, realHeight);
+                }
+            });
+            byteVideoFrame = new byte[m_nVideoWidth * m_nVideoHeight * 4];
 
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                m_videoPlayer.loadVideo(strVideoPath, m_surfaceHolder.getSurface(), byteVideoFrame);
-            }
-        }).start();
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    m_videoPlayer.loadVideo(strVideoPath, m_surfaceHolder.getSurface(), byteVideoFrame);
+                }
+            }).start();
+        } catch (Exception e) {
+            Toast.makeText(this, "Can't load the video", Toast.LENGTH_SHORT).show();
+            mediaMetadataRetriever.release();
+            return;
+        }
 
         String strDuration = mediaMetadataRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
         assert strDuration != null;
         mDuration = Long.parseLong(strDuration);
-        if(mDuration <= 0) {
-            mediaMetadataRetriever.release();
-            return;
-        }
         mediaMetadataRetriever.release();
     }
 
@@ -417,30 +565,126 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             m_videoPlayer.play();
             m_bVideoPaused = false;
         }
+        if (m_bCameraOpened && m_rbUSB.isChecked() && m_bUSBPaused ) {
+            openUSBCamera();
+            m_bUSBPaused = false;
+        }
+    }
 
-//        if (m_bCameraOpened && m_rbUSB.isChecked() && m_bUSBPaused ) {
-//
-//            openUSBCamera();
-//            m_bUSBPaused = false;
-//        }
+    private void openUSBCamera() {
+        ArrayList<UsbDevice> devList = UsbTv.enumerateUsbtvDevices(this);
+
+        if (!devList.isEmpty()) {
+            m_device = devList.get(0);
+        } else {
+            Timber.i("Dev List Empty");
+        }
+
+        if (m_device == null) {
+            Timber.i("Can't open");
+            return;
+        }
+        DeviceParams params = new DeviceParams.Builder()
+                .setUsbDevice(m_device)
+                .setDriverCallbacks(mCallbacks)
+                .setInput(UsbTv.InputSelection.COMPOSITE)
+                .setScanType(UsbTv.ScanType.PROGRESSIVE)
+                .setTvNorm(UsbTv.TvNorm.NTSC)
+                .build();
+        m_surfaceHolder.setFixedSize(params.getFrameWidth(), params.getFrameHeight());
+        m_surfaceHolder.setFormat(PixelFormat.RGBA_8888);
+
+        Timber.i("Open Device");
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Toast.makeText(MainActivity.this,"Open Device", Toast.LENGTH_SHORT).show();
+            }
+        });
+        UsbTv.open(this, params);
     }
 
     @Override
     public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {
+        if (m_rbUSB.isChecked()) {
 
+            if ((width == 0) || (height == 0)) return;
+            Timber.v("Camera surfaceChanged:");
+            mPreviewSurface = holder.getSurface();
+            synchronized (CAM_LOCK) {
+                if (mUSBDriver!= null) {
+                    if (mRenderer == null) {
+                        mRenderer = new USBTVRenderer(getApplicationContext(), mPreviewSurface);
+                        mRenderer.setUSBRenderCallback(MainActivity.this);
+                    } else {
+                        mRenderer.setSurface(mPreviewSurface);
+                    }
+
+
+                    final int frameWidth = mUSBDriver.getDeviceParams().getFrameWidth();
+                    final int frameHeight = mUSBDriver.getDeviceParams().getFrameHeight();
+                    byteUSBFrame = new byte[frameWidth * frameHeight * 4];
+                    m_vwDetect.setImageSize(frameWidth, frameHeight);
+
+                    m_sfImageView.post(new Runnable() {
+                        @Override
+                        public void run() {
+
+                            int containerWidth = m_rlImageView.getWidth();
+                            int containerHeight = m_rlImageView.getHeight();
+
+                            float scaleX = frameWidth / (float) containerWidth;
+                            float scaleY = frameHeight / (float) containerHeight;
+                            float scale  = Math.max(scaleX, scaleY);
+
+                            int realWidth = (int) (frameWidth / scale);
+                            int realHeight = (int) (frameHeight / scale);
+
+                            setVideoSize(realWidth, realHeight);
+                        }
+                    });
+
+                    // If not streaming, start
+                    if (mIsStreaming.compareAndSet(false, true)) {
+                        mRenderer.startRenderer(mUSBDriver.getDeviceParams(), byteUSBFrame);
+                        mUSBDriver.startStreaming();
+                    }
+                }
+            }
+        }
     }
 
     @Override
     public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
-        if( m_rbVideo.isChecked()) {
+        if (m_rbVideo.isChecked()) {
             m_videoPlayer.pause();
             m_bVideoPaused = true;
+        }
+        if (m_rbUSB.isChecked()) {
+
+            synchronized (CAM_LOCK) {
+                if (mRenderer != null) {
+                    mRenderer.stopRenderer();
+                }
+
+                if (mUSBDriver != null && mIsStreaming.get()) {
+                    mUSBDriver.stopStreaming();
+                }
+                mIsStreaming.set(false);
+                mPreviewSurface = null;
+                m_bUSBPaused = true;
+                if  (mUSBDriver  != null)
+                    mUSBDriver.close();
+                mRenderer = null;
+
+                UsbTv.closeCamera();
+            }
         }
     }
 
     @Override
     public void onGrabFrame(int cur_time, int duration) {
-
+        setPlayingTime(cur_time, duration);
     }
 
     @Override
@@ -453,5 +697,16 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                 }
             });
         }
+    }
+
+    @Override
+    public void onUSBFrameGrab(int width, int height) {
+        Mat matFrame = new Mat(height, width, CV_8UC4);
+        matFrame.put(0, 0, byteUSBFrame);
+//        Rect rect = new Rect((int) (0.1f * width), (int) (0.1f * height), (int) (0.9f * width), (int) (0.9f * height));
+//        crLPREngineInterface.Process(m_nCurFrame, matFrame.getNativeObjAddr(), rect);
+//        matFrame.release();
+//        matFrame = null;
+//        m_nCurFrame++;
     }
 }

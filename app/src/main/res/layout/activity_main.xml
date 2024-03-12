@@ -109,6 +109,10 @@
             android:layout_height="match_parent"
             android:layout_centerInParent="true"
             />
+        <com.tcvdev.lpr.element.DetectView
+            android:id="@+id/vw_detect"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
     </RelativeLayout>
 
     <SeekBar

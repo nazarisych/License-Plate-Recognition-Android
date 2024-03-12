@@ -1,16 +1,10 @@
-//
-// Created by frank on 2018/2/1.
-//
 #include <jni.h>
 #include <stdlib.h>
 #include <unistd.h>
-//封装格式
+
 #include "libavformat/avformat.h"
-//解码
 #include "libavcodec/avcodec.h"
-//缩放
 #include "libswscale/swscale.h"
-//重采样
 #include "libswresample/swresample.h"
 #include <android/log.h>
 
@@ -24,20 +18,16 @@ JNIEXPORT void JNICALL Java_com_frank_ffmpeg_AudioPlayer_play
   (JNIEnv *env, jobject jthiz, jstring input_jstr){
 	const char* input_cstr = (*env)->GetStringUTFChars(env,input_jstr,NULL);
 	LOGI("input_cstr=%s", input_cstr);
-	//注册组件
 	av_register_all();
 	AVFormatContext *pFormatCtx = avformat_alloc_context();
-	//打开音频文件
 	if(avformat_open_input(&pFormatCtx,input_cstr,NULL,NULL) != 0){
 		LOGI("%s","无法打开音频文件");
 		return;
 	}
-	//获取输入文件信息
 	if(avformat_find_stream_info(pFormatCtx,NULL) < 0){
 		LOGI("%s","无法获取输入文件信息");
 		return;
 	}
-	//获取音频流索引位置
 	int i = 0, audio_stream_idx = -1;
 	for(; i < pFormatCtx->nb_streams;i++){
 		if(pFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_AUDIO){
@@ -45,8 +35,6 @@ JNIEXPORT void JNICALL Java_com_frank_ffmpeg_AudioPlayer_play
 			break;
 		}
 	}
-
-	//获取音频解码器
 	AVCodecContext *codecCtx = pFormatCtx->streams[audio_stream_idx]->codec;
 	AVCodec *codec = avcodec_find_decoder(codecCtx->codec_id);
 	if(codec == NULL){

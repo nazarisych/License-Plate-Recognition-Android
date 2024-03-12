@@ -42,19 +42,15 @@ long videoHeight;
 
 void setJNISurfaceView(JNIEnv *env, jobject surface)
 {
-    // 获取native window
     nativeWindow1 = ANativeWindow_fromSurface(env, surface);
-    // 获取视频宽高
     videoWidth = pCodecCtx1->width;
     videoHeight = pCodecCtx1->height;
-    // 设置native window的buffer大小,可自动拉伸
     ANativeWindow_setBuffersGeometry(nativeWindow1, videoWidth, videoHeight, WINDOW_FORMAT_RGBA_8888);
 }
 
 JNIEXPORT void JNICALL Java_com_frank_ffmpeg_VideoPlayer_nativeClassInit(JNIEnv* env, jclass clazz)
 {
     method_onGrabFrame = (*env)->GetMethodID(env, clazz, "onGrabFrame", "(II)V");
-//    method_onCurTime = (*env)->GetMethodID(env, clazz, "onCurTime", "(II)V");
     method_onPlayStatus = (*env)->GetMethodID(env, clazz, "onPlayStatus", "(I)V");
 
 }
