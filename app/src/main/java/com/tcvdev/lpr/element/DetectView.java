@@ -10,15 +10,10 @@ import android.support.annotation.Nullable;
 import android.util.AttributeSet;
 import android.view.View;
 
-import com.tcvdev.lpr.model.LPRResultData;
+import com.tcvdev.lpr.model.CARPLATEDATA;
 import com.crashlytics.android.Crashlytics;
 import com.tcvdev.lpr.R;
 import com.tcvdev.lpr.common.Util;
-
-
-/**
- * Created by Pinky on 12/11/2017.
- */
 
 public class DetectView extends View {
 
@@ -30,7 +25,7 @@ public class DetectView extends View {
     private Paint mConfBGPaint;
 
 
-    private LPRResultData mLprResultData;
+    private CARPLATEDATA mCarPlateData;
     private int m_nImgWidth;
     private int m_nImgHeight;
     private int m_nCntPlate;
@@ -42,7 +37,7 @@ public class DetectView extends View {
         this.m_nCntPlate = 0;
     }
 
-    public DetectView(Context context,  AttributeSet attrs) {
+    public DetectView(Context context, AttributeSet attrs) {
         super(context, attrs);
 
         this.mContext = context;
@@ -81,9 +76,9 @@ public class DetectView extends View {
         int height = canvas.getHeight();
 
         try {
-            if (mLprResultData != null && mLprResultData.plateData != null) {
+            if (mCarPlateData != null && mCarPlateData.pPlate != null) {
 
-                int cnt = mLprResultData.nPlateNum;
+                int cnt = mCarPlateData.nPlate;
 
                 float scaleX = (float) width / m_nImgWidth;
                 float scaleY = (float) height / m_nImgHeight;
@@ -94,16 +89,16 @@ public class DetectView extends View {
 
                 for (int i = 0; i < cnt; i++) {
 
-                    LPRResultData.OnePlateData plateData = mLprResultData.plateData[i];
+                    CARPLATEDATA.LICENSE plateData = mCarPlateData.pPlate[i];
                     if (plateData != null) {
 
-                        RectF rectPlate = new RectF(mLprResultData.plateData[i].lprRect.left * scale, mLprResultData.plateData[i].lprRect.top * scale,
-                                mLprResultData.plateData[i].lprRect.right * scale, mLprResultData.plateData[i].lprRect.bottom * scale);
+                        RectF rectPlate = new RectF(mCarPlateData.pPlate[i].rtPlate.left * scale, mCarPlateData.pPlate[i].rtPlate.top * scale,
+                                mCarPlateData.pPlate[i].rtPlate.right * scale, mCarPlateData.pPlate[i].rtPlate.bottom * scale);
 
                         rectPlate.offset(offsetLeft, offsetTop);
                         canvas.drawRect(rectPlate, mRectPaint);
 
-                        String strResult = Util.getValidString(mLprResultData.plateData[i].lprStr, 20);
+                        String strResult = Util.getValidString(mCarPlateData.pPlate[i].szLicense, 20);
 
                         Rect rectNumberBound = Util.getTextBounds(mTextNumberPaint, strResult);
                         int textPadding = 20;
@@ -115,7 +110,7 @@ public class DetectView extends View {
                         canvas.drawText(strResult, rectNumberBG.left + textPadding, rectNumberBG.bottom - textPadding, mTextNumberPaint);
 
                         // Draw Conf;
-                        String strConf = String.format("Conf: %.3f%%", plateData.conf);
+                        String strConf = String.format("Conf: %.3f%%", plateData.pfDist);
                         Rect rectConfBound = Util.getTextBounds(mTextConfPaint, strConf);
                         RectF rectConfBG = new RectF(rectPlate.left, rectPlate.top - offset - rectConfBound.height() - textPadding * 2,
                                 rectPlate.left + rectConfBound.width() + textPadding * 2, rectPlate.top - offset);
@@ -129,21 +124,17 @@ public class DetectView extends View {
         } catch (NullPointerException ex) {
             ex.printStackTrace();
             Crashlytics.logException(ex);
-            Crashlytics.log(1, "Pinky", "NullPointException");
+            Crashlytics.log(1, "LPR", "NullPointException");
         }
 
     }
 
-    public void setLPRResult(LPRResultData lprResultData) {
+    public void setLPRResult(CARPLATEDATA carplatedata) {
 
-        this.mLprResultData = lprResultData;
-
-
-
+        this.mCarPlateData = carplatedata;
         ((Activity) mContext).runOnUiThread(new Runnable() {
             @Override
             public void run() {
-
                 invalidate();
             }
         });

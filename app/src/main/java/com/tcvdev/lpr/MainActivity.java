@@ -9,17 +9,16 @@ import android.graphics.PixelFormat;
 import android.hardware.usb.UsbDevice;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
+import android.os.Bundle;
 import android.support.annotation.NonNull;
 import android.support.v4.app.ActivityCompat;
 import android.support.v4.content.ContextCompat;
-import android.support.v7.app.AppCompatActivity;
 import android.support.v7.app.AlertDialog;
+import android.support.v7.app.AppCompatActivity;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
-import android.os.Bundle;
-
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -35,14 +34,14 @@ import com.arksine.libusbtv.DeviceParams;
 import com.arksine.libusbtv.IUsbTvDriver;
 import com.arksine.libusbtv.UsbTv;
 import com.arksine.libusbtv.UsbTvFrame;
-import com.codekidlabs.storagechooser.StorageChooser;
 import com.codekidlabs.storagechooser.Content;
-
-
+import com.codekidlabs.storagechooser.StorageChooser;
 import com.frank.ffmpeg.VideoPlayer;
+import com.lpr.ua.UALPREngine;
 import com.tcvdev.lpr.common.USBTVRenderer;
 import com.tcvdev.lpr.common.Util;
 import com.tcvdev.lpr.element.DetectView;
+import com.tcvdev.lpr.model.CARPLATEDATA;
 
 import org.opencv.core.Mat;
 
@@ -55,7 +54,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import timber.log.Timber;
 
 public class MainActivity extends AppCompatActivity implements View.OnClickListener, SurfaceHolder.Callback,
-        VideoPlayer.FFMPEGCallback, USBTVRenderer.USBRenderCallback {
+        VideoPlayer.FFMPEGCallback, USBTVRenderer.USBRenderCallback, UALPREngine.UALPRCallback {
     private static final int STATUS_STOP = 0;
     private static final int STATUS_PAUSE = 1;
     private static final int STATUS_PLAY = 2;
@@ -85,9 +84,11 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     private Surface mPreviewSurface;
     private boolean m_bCameraOpened = false;
     private final Object CAM_LOCK = new Object();
+    private CARPLATEDATA m_prevCarPlateData;
     AtomicBoolean mIsStreaming = new AtomicBoolean(false);
     private USBTVRenderer mRenderer = null;
     private int m_nPlayStatus;
+    private int m_nNotFoundCnt;
     private final StorageChooser.Builder builder = new StorageChooser.Builder();
     private final ArrayList<String> mCountryList = new ArrayList<>();
 
@@ -384,6 +385,8 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         m_btnRewind30 = findViewById(R.id.btn_rewind_30);
         m_btnForward10 = findViewById(R.id.btn_forward_10);
         m_btnForward30 = findViewById(R.id.btn_forward_30);
+        m_vwDetect = findViewById(R.id.vw_detect);
+
 
         m_sbTime.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
@@ -506,14 +509,14 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     }
 
     private void loadVideo() throws IOException {
-
+        m_nNotFoundCnt = 0;
         final String strVideoPath = m_etVideoPath.getText().toString();
         try {
             mediaMetadataRetriever = new MediaMetadataRetriever();
             mediaMetadataRetriever.setDataSource(this, Uri.parse(strVideoPath));
             m_nVideoWidth = Integer.parseInt(Objects.requireNonNull(mediaMetadataRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)));
             m_nVideoHeight = Integer.parseInt(Objects.requireNonNull(mediaMetadataRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)));
-            //m_vwDetect.setImageSize(m_nVideoWidth, m_nVideoHeight);
+            m_vwDetect.setImageSize(m_nVideoWidth, m_nVideoHeight);
             m_sfImageView.post(new Runnable() {
                 @Override
                 public void run() {
@@ -565,7 +568,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             m_videoPlayer.play();
             m_bVideoPaused = false;
         }
-        if (m_bCameraOpened && m_rbUSB.isChecked() && m_bUSBPaused ) {
+        if (m_bCameraOpened && m_rbUSB.isChecked() && m_bUSBPaused) {
             openUSBCamera();
             m_bUSBPaused = false;
         }
@@ -598,7 +601,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                Toast.makeText(MainActivity.this,"Open Device", Toast.LENGTH_SHORT).show();
+                Toast.makeText(MainActivity.this, "Open Device", Toast.LENGTH_SHORT).show();
             }
         });
         UsbTv.open(this, params);
@@ -612,14 +615,13 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             Timber.v("Camera surfaceChanged:");
             mPreviewSurface = holder.getSurface();
             synchronized (CAM_LOCK) {
-                if (mUSBDriver!= null) {
+                if (mUSBDriver != null) {
                     if (mRenderer == null) {
                         mRenderer = new USBTVRenderer(getApplicationContext(), mPreviewSurface);
                         mRenderer.setUSBRenderCallback(MainActivity.this);
                     } else {
                         mRenderer.setSurface(mPreviewSurface);
                     }
-
 
                     final int frameWidth = mUSBDriver.getDeviceParams().getFrameWidth();
                     final int frameHeight = mUSBDriver.getDeviceParams().getFrameHeight();
@@ -635,7 +637,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
 
                             float scaleX = frameWidth / (float) containerWidth;
                             float scaleY = frameHeight / (float) containerHeight;
-                            float scale  = Math.max(scaleX, scaleY);
+                            float scale = Math.max(scaleX, scaleY);
 
                             int realWidth = (int) (frameWidth / scale);
                             int realHeight = (int) (frameHeight / scale);
@@ -673,7 +675,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                 mIsStreaming.set(false);
                 mPreviewSurface = null;
                 m_bUSBPaused = true;
-                if  (mUSBDriver  != null)
+                if (mUSBDriver != null)
                     mUSBDriver.close();
                 mRenderer = null;
 
@@ -703,10 +705,27 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     public void onUSBFrameGrab(int width, int height) {
         Mat matFrame = new Mat(height, width, CV_8UC4);
         matFrame.put(0, 0, byteUSBFrame);
-//        Rect rect = new Rect((int) (0.1f * width), (int) (0.1f * height), (int) (0.9f * width), (int) (0.9f * height));
-//        crLPREngineInterface.Process(m_nCurFrame, matFrame.getNativeObjAddr(), rect);
-//        matFrame.release();
-//        matFrame = null;
-//        m_nCurFrame++;
+    }
+
+    @Override
+    public void onUALPRResult(byte[] byteArray) {
+        CARPLATEDATA carplatedata = new CARPLATEDATA();
+        CARPLATEDATA.parseFromByte(byteArray, carplatedata);
+
+        if (carplatedata.nPlate == 0) {
+            if (m_nNotFoundCnt < 10) {
+                m_nNotFoundCnt++;
+                m_vwDetect.setLPRResult(m_prevCarPlateData);
+            } else {
+
+                m_prevCarPlateData = null;
+                m_vwDetect.setLPRResult(m_prevCarPlateData);
+                m_nNotFoundCnt = 0;
+            }
+        } else {
+            m_nNotFoundCnt = 0;
+            m_vwDetect.setLPRResult(carplatedata);
+            m_prevCarPlateData = carplatedata;
+        }
     }
 }
